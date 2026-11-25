@@ -111,8 +111,6 @@ static int appleib_forward_int_op(struct hid_device *hdev,
 			if (rc)
 				break;
 		}
-
-		break;
 	}
 
 	return rc;
