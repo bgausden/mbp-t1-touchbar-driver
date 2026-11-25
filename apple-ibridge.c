@@ -380,9 +380,11 @@ static struct appleib_hid_dev_info *appleib_add_device(struct hid_device *hdev)
 			appleib_add_sub_dev(hdev_info, &appleib_sub_hid_ids[i]);
 
 		if (IS_ERR(hdev_info->sub_hdevs[i])) {
+			int rc = PTR_ERR(hdev_info->sub_hdevs[i]);
+
 			while (i-- > 0)
 				hid_destroy_device(hdev_info->sub_hdevs[i]);
-			return (void *)hdev_info->sub_hdevs[i];
+			return ERR_PTR(rc);
 		}
 	}
 
