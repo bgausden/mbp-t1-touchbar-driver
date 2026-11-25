@@ -45,6 +45,7 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/usb.h>
+#include <linux/version.h>
 
 #define USB_VENDOR_ID_APPLE		0x05ac
 #define USB_DEVICE_ID_APPLE_IBRIDGE	0x8600
@@ -451,11 +452,67 @@ static const struct hid_device_id appleib_hid_ids[] = {
 	{ },
 };
 
+#define APPLEIB_RDESC_SIZE	634	/* size of the T1 display-control
+					 interface's report descriptor */
+
+/*
+ * Some fields in the touch bar display-control interface's report
+ * descriptor have a size of 64 bits, which according to HID 1.11 Section
+ * 8.4 is not valid ("An item field cannot span more than 4 bytes in a
+ * report"). Furthermore, hid_field_extract() complains when encountering
+ * such a field. So turn them into two 32-bit fields instead.
+ *
+ * This callback was dropped in the rewrite this driver is based on; it is
+ * restored here from the original driver (roadrunner2/
+ * macbook12-spi-driver, touchbar-driver-hid-driver branch), with the
+ * return type adapted to the kernel: struct hid_driver.report_fixup
+ * became const-qualified in 6.12.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+static const __u8 *appleib_report_fixup(struct hid_device *hdev, __u8 *rdesc,
+				       unsigned int *rsize)
+#else
+static __u8 *appleib_report_fixup(struct hid_device *hdev, __u8 *rdesc,
+				 unsigned int *rsize)
+#endif
+{
+	if (*rsize == APPLEIB_RDESC_SIZE &&
+	    /* Usage Page 0xff12 (vendor defined) */
+	    rdesc[212] == 0x06 && rdesc[213] == 0x12 && rdesc[214] == 0xff &&
+	    /* Usage 0x51 */
+	    rdesc[416] == 0x09 && rdesc[417] == 0x51 &&
+	    /* report size 64 */
+	    rdesc[432] == 0x75 && rdesc[433] == 64 &&
+	    /* report count 1 */
+	    rdesc[434] == 0x95 && rdesc[435] == 1) {
+		rdesc[433] = 32;
+		rdesc[435] = 2;
+		hid_dbg(hdev, "Fixed up first 64-bit field\n");
+	}
+
+	if (*rsize == APPLEIB_RDESC_SIZE &&
+	    /* Usage Page 0xff12 (vendor defined) */
+	    rdesc[212] == 0x06 && rdesc[213] == 0x12 && rdesc[214] == 0xff &&
+	    /* Usage 0x51 */
+	    rdesc[611] == 0x09 && rdesc[612] == 0x51 &&
+	    /* report size 64 */
+	    rdesc[627] == 0x75 && rdesc[628] == 64 &&
+	    /* report count 1 */
+	    rdesc[629] == 0x95 && rdesc[630] == 1) {
+		rdesc[628] = 32;
+		rdesc[630] = 2;
+		hid_dbg(hdev, "Fixed up second 64-bit field\n");
+	}
+
+	return rdesc;
+}
+
 static struct hid_driver appleib_hid_driver = {
 	.name = "apple-ibridge-hid",
 	.id_table = appleib_hid_ids,
 	.probe = appleib_hid_probe,
 	.remove = appleib_hid_remove,
+	.report_fixup = appleib_report_fixup,
 	.raw_event = appleib_hid_raw_event,
 #ifdef CONFIG_PM
 	.suspend = appleib_hid_suspend,
