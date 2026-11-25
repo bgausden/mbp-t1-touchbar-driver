@@ -130,9 +130,18 @@ static const struct attribute_group appletb_attr_group = {
 	.attrs = appletb_attrs,
 };
 
+/* bitmask of interfaces that have resumed since the last suspend */
+#define APPLETB_RESUMED_MODE	BIT(0)
+#define APPLETB_RESUMED_DISP	BIT(1)
+#define APPLETB_RESUMED_BOTH	(APPLETB_RESUMED_MODE | APPLETB_RESUMED_DISP)
+
 struct appletb_device {
 	bool			active;
 	struct device		*log_dev;
+	/* bitmask of APPLETB_RESUMED_*: interfaces resumed since the last
+	 * suspend or completed restore
+	 */
+	u8			resumed_mask;
 
 	struct hid_field	*mode_field;
 	struct hid_field	*disp_field;
@@ -1269,6 +1278,8 @@ static int appletb_suspend(struct hid_device *hdev, pm_message_t message)
 
 	spin_lock_irqsave(&tb_dev->tb_lock, flags);
 
+	/* re-arm the resume-completion tracking (see appletb_reset_resume) */
+	tb_dev->resumed_mask = 0;
 	tb_dev->cur_tb_mode = APPLETB_CMD_MODE_OFF;
 	tb_dev->cur_tb_disp = APPLETB_CMD_DISP_OFF;
 
@@ -1284,6 +1295,7 @@ static int appletb_reset_resume(struct hid_device *hdev)
 	struct appletb_device *tb_dev = hid_get_drvdata(hdev);
 	struct appletb_iface_info *iface_info;
 	unsigned long flags;
+	bool print_resumed = false;
 
 	spin_lock_irqsave(&tb_dev->tb_lock, flags);
 
@@ -1291,22 +1303,46 @@ static int appletb_reset_resume(struct hid_device *hdev)
 	if (iface_info)
 		iface_info->suspended = false;
 
-	if ((tb_dev->mode_iface.hdev && !tb_dev->mode_iface.suspended) &&
-	    (tb_dev->disp_iface.hdev && !tb_dev->disp_iface.suspended)) {
-		/*
-		 * Restore touch bar state. Note that autopm state is not
-		 * preserved, so need explicitly restore that here.
-		 */
-		tb_dev->active = true;
-		tb_dev->restore_autopm = true;
-		tb_dev->last_event_time = ktime_get();
+	/*
+	 * Restore the touch bar state once, when both interfaces have
+	 * resumed. This callback services both .resume and .reset_resume,
+	 * and is invoked once for each of the two underlying USB interfaces
+	 * (mode and display), but the iface_info->suspended flags cannot be
+	 * used to detect completion: when the iBridge is already
+	 * runtime-suspended when the system suspends (the common case when
+	 * the touch bar has been idle), the PM core skips the
+	 * system-suspend callbacks, so both flags are already false when the
+	 * first resume callback runs and a flags-based condition would fire
+	 * on both callbacks. The resumed_mask bits instead record which
+	 * interfaces have resumed since the last suspend or completed
+	 * restore, so this works regardless of callback order and
+	 * regardless of whether the suspend callbacks ran. Note that autopm
+	 * state is not preserved, so need explicitly restore that here.
+	 */
+	if (iface_info) {
+		tb_dev->resumed_mask |=
+			iface_info == &tb_dev->mode_iface ?
+				APPLETB_RESUMED_MODE : APPLETB_RESUMED_DISP;
 
-		appletb_update_touchbar_no_lock(tb_dev, true);
+		if (tb_dev->mode_iface.hdev && tb_dev->disp_iface.hdev &&
+		    tb_dev->resumed_mask == APPLETB_RESUMED_BOTH) {
+			tb_dev->active = true;
+			tb_dev->restore_autopm = true;
+			tb_dev->last_event_time = ktime_get();
 
-		dev_info(tb_dev->log_dev, "Touchbar resumed.\n");
+			appletb_update_touchbar_no_lock(tb_dev, true);
+
+			/* re-arm for the next suspend/resume cycle */
+			tb_dev->resumed_mask = 0;
+
+			print_resumed = true;
+		}
 	}
 
 	spin_unlock_irqrestore(&tb_dev->tb_lock, flags);
+
+	if (print_resumed)
+		dev_info(tb_dev->log_dev, "Touchbar resumed.\n");
 
 	return 0;
 }
@@ -1349,6 +1385,7 @@ static struct hid_driver appletb_hid_driver = {
 	.input_configured = appletb_input_configured,
 #ifdef CONFIG_PM
 	.suspend = appletb_suspend,
+	.resume = appletb_reset_resume,
 	.reset_resume = appletb_reset_resume,
 #endif
 };
