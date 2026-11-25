@@ -43,8 +43,10 @@
 #include <linux/hid.h>
 #include <linux/list.h>
 #include <linux/module.h>
+#include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/usb.h>
+#include <linux/version.h>
 
 #define USB_VENDOR_ID_APPLE		0x05ac
 #define USB_DEVICE_ID_APPLE_IBRIDGE	0x8600
@@ -466,12 +468,16 @@ static struct hid_driver appleib_hid_driver = {
 #endif
 };
 
-static struct appleib_device *appleib_alloc_device(struct acpi_device *acpi_dev)
+static struct appleib_device *appleib_alloc_device(struct platform_device *pdev)
 {
+	struct acpi_device *acpi_dev = ACPI_COMPANION(&pdev->dev);
 	struct appleib_device *ib_dev;
 	acpi_status sts;
 
-	ib_dev = devm_kzalloc(&acpi_dev->dev, sizeof(*ib_dev), GFP_KERNEL);
+	if (!acpi_dev)
+		return ERR_PTR(-ENODEV);
+
+	ib_dev = devm_kzalloc(&pdev->dev, sizeof(*ib_dev), GFP_KERNEL);
 	if (!ib_dev)
 		return ERR_PTR(-ENOMEM);
 
@@ -495,12 +501,12 @@ static struct appleib_device *appleib_alloc_device(struct acpi_device *acpi_dev)
 	return ib_dev;
 }
 
-static int appleib_probe(struct acpi_device *acpi)
+static int appleib_probe(struct platform_device *pdev)
 {
 	struct appleib_device *ib_dev;
 	int ret;
 
-	ib_dev = appleib_alloc_device(acpi);
+	ib_dev = appleib_alloc_device(pdev);
 	if (IS_ERR(ib_dev))
 		return PTR_ERR(ib_dev);
 
@@ -511,22 +517,37 @@ static int appleib_probe(struct acpi_device *acpi)
 		return ret;
 	}
 
-	acpi->driver_data = ib_dev;
+	platform_set_drvdata(pdev, ib_dev);
 
 	return 0;
 }
 
-static void appleib_remove(struct acpi_device *acpi)
+/*
+ * struct platform_driver.remove returns int up to kernel 6.10 (the void
+ * variant was spelled .remove_new between 5.18 and 6.10 and was renamed
+ * to .remove in 6.11), so provide an int-returning variant for kernels
+ * before the change.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+static void appleib_remove(struct platform_device *pdev)
 {
 	hid_unregister_driver(&appleib_hid_driver);
 }
+#else
+static int appleib_remove(struct platform_device *pdev)
+{
+	hid_unregister_driver(&appleib_hid_driver);
+
+	return 0;
+}
+#endif
 
 static int appleib_suspend(struct device *dev)
 {
 	struct appleib_device *ib_dev;
 	int rc;
 
-	ib_dev = acpi_driver_data(to_acpi_device(dev));
+	ib_dev = platform_get_drvdata(to_platform_device(dev));
 
 	rc = acpi_execute_simple_method(ib_dev->asoc_socw, NULL, 0);
 	if (ACPI_FAILURE(rc))
@@ -541,7 +562,7 @@ static int appleib_resume(struct device *dev)
 	struct appleib_device *ib_dev;
 	int rc;
 
-	ib_dev = acpi_driver_data(to_acpi_device(dev));
+	ib_dev = platform_get_drvdata(to_platform_device(dev));
 
 	rc = acpi_execute_simple_method(ib_dev->asoc_socw, NULL, 1);
 	if (ACPI_FAILURE(rc))
@@ -564,20 +585,17 @@ static const struct acpi_device_id appleib_acpi_match[] = {
 
 MODULE_DEVICE_TABLE(acpi, appleib_acpi_match);
 
-static struct acpi_driver appleib_driver = {
-	.name		= "apple-ibridge",
-	.class		= "topcase", /* ? */
-	.ids		= appleib_acpi_match,
-	.ops		= {
-		.add		= appleib_probe,
-		.remove		= appleib_remove,
-	},
-	.drv		= {
+static struct platform_driver appleib_driver = {
+	.probe		= appleib_probe,
+	.remove		= appleib_remove,
+	.driver		= {
+		.name		= "apple-ibridge",
+		.acpi_match_table = appleib_acpi_match,
 		.pm		= &appleib_pm,
 	},
 };
 
-module_acpi_driver(appleib_driver)
+module_platform_driver(appleib_driver)
 
 MODULE_AUTHOR("Ronald Tschalär");
 MODULE_DESCRIPTION("Apple iBridge driver");
